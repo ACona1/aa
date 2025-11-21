@@ -2,6 +2,7 @@ import ftplib
 import json
 import requests
 import time
+import random  # <-- مكتبة للاختيار العشوائي
 from io import BytesIO
 import concurrent.futures
 
@@ -16,15 +17,38 @@ REMOTE_PATH = "htdocs"
 ST_LOGIN = "2e8783677aef747a702a"
 ST_KEY = "qlbjQjOB1AizGGe"
 
-# عدد العمليات المتزامنة (طلبك 20)
 MAX_WORKERS = 20 
+
+# ==========================================
+# 🌐 PROXY SETTINGS (ضع البروكسيات هنا)
+# ==========================================
+# الصيغة: "ip:port" أو "user:pass@ip:port"
+# يفضل استخدام بروكسيات HTTPS قوية
+PROXY_LIST = [
+    # أمثلة (استبدلها ببروكسيات حقيقية):
+    # "123.45.67.89:8080",
+    # "user:pass@192.168.1.1:3128",
+]
+
+# تفعيل البروكسي؟ (True/False)
+USE_PROXY = False  # <-- اجعلها True لو معاك بروكسيات شغالة
 
 # ==========================================
 # 🛠️ HELPER FUNCTIONS
 # ==========================================
 
+def get_random_proxy():
+    """يختار بروكسي عشوائي ويجهزه لمكتبة requests"""
+    if not USE_PROXY or not PROXY_LIST:
+        return None
+    
+    proxy_ip = random.choice(PROXY_LIST)
+    return {
+        "http": f"http://{proxy_ip}",
+        "https": f"http://{proxy_ip}",
+    }
+
 def connect_ftp():
-    """Establishes a fresh FTP connection."""
     try:
         ftp = ftplib.FTP(FTP_HOST)
         ftp.login(FTP_USER, FTP_PASS)
@@ -40,7 +64,10 @@ def add_remote_upload(url, filename, folder_id=None):
         api_url += f"&folder={folder_id}"
         
     try:
-        r = requests.get(api_url).json()
+        # 🔥 إضافة البروكسي هنا
+        proxies = get_random_proxy()
+        r = requests.get(api_url, proxies=proxies, timeout=15).json()
+        
         if r['status'] == 200 and 'result' in r:
             return r['result']['id'], r['result'].get('folderid')
     except:
@@ -50,15 +77,15 @@ def add_remote_upload(url, filename, folder_id=None):
 def wait_for_completion(remote_id, log_prefix=""):
     api_url = f"https://api.streamtape.com/remotedl/status?login={ST_LOGIN}&key={ST_KEY}&id={remote_id}"
     
-    # لا نطبع نقاط كثيرة عشان الـ terminal ميتزحمش مع 20 عملية
-    # print(f"{log_prefix} ⏳ Transferring...", end="", flush=True)
-    
     retries = 0
     max_retries = 120 
     
     while retries < max_retries:
         try:
-            r = requests.get(api_url).json()
+            # 🔥 إضافة البروكسي هنا أيضاً
+            proxies = get_random_proxy()
+            r = requests.get(api_url, proxies=proxies, timeout=15).json()
+            
             result = r['result'].get(str(remote_id))
             
             if result:
@@ -83,7 +110,8 @@ def get_real_file_link(filename, folder_id):
     api_url = f"https://api.streamtape.com/file/listfolder?login={ST_LOGIN}&key={ST_KEY}{folder_param}"
     
     try:
-        r = requests.get(api_url).json()
+        proxies = get_random_proxy()
+        r = requests.get(api_url, proxies=proxies, timeout=15).json()
         if r['status'] == 200 and 'result' in r:
             files = r['result']['files']
             for f in files:
@@ -98,7 +126,8 @@ def upload_subtitle_to_cloud(file_content, filename):
     headers = {'User-Agent': 'Mozilla/5.0'}
     files = {'file': (filename, file_content, 'text/plain')}
     try:
-        r = requests.post(url, files=files, headers=headers)
+        proxies = get_random_proxy()
+        r = requests.post(url, files=files, headers=headers, proxies=proxies, timeout=20)
         return r.json().get('downloadUrl')
     except:
         return None
@@ -108,26 +137,19 @@ def upload_subtitle_to_cloud(file_content, filename):
 # ==========================================
 
 def process_single_folder(folder_name):
-    """
-    هذه الدالة تقوم بمعالجة مجلد واحد بالكامل.
-    تفتح FTP فقط عند القراءة والكتابة، وتغلقه أثناء الانتظار.
-    """
     log_prefix = f"[{folder_name}]"
     print(f"{log_prefix} 🚀 Started processing...")
 
-    # ---------------------------------------------------------
-    # PHASE 1: READ DATA (Connect FTP -> Read -> Disconnect)
-    # ---------------------------------------------------------
     playlist_data = []
-    vtt_files_data = {} # Store filename: content
+    vtt_files_data = {} 
     
+    # 1. FTP READ (بدون بروكسي طبعاً لأن الـ FTP حساس)
     try:
         ftp = connect_ftp()
         try:
             ftp.cwd(f"/{REMOTE_PATH}/{folder_name}")
             files_in_folder = ftp.nlst()
             
-            # 1. Read Playlist
             if "playlist.json" in files_in_folder:
                 bio = BytesIO()
                 ftp.retrbinary("RETR playlist.json", bio.write)
@@ -136,7 +158,6 @@ def process_single_folder(folder_name):
                 except:
                     print(f"{log_prefix} ❌ Invalid JSON.")
 
-            # 2. Read VTT Files Content
             vtt_files_list = [f for f in files_in_folder if f.endswith('.vtt')]
             for vf in vtt_files_list:
                 bio_vtt = BytesIO()
@@ -144,16 +165,12 @@ def process_single_folder(folder_name):
                 vtt_files_data[vf] = bio_vtt.getvalue().decode('utf-8')
 
         finally:
-            ftp.quit() # 🔥 IMPORTANT: Close connection fast!
+            ftp.quit()
     except Exception as e:
         print(f"{log_prefix} ❌ Error reading folder: {e}")
         return
 
-    # ---------------------------------------------------------
-    # PHASE 2: PROCESSING (HTTP ONLY - NO FTP)
-    # ---------------------------------------------------------
-    
-    # A. Process Videos
+    # 2. PROCESSING (With Proxy Support)
     new_playlist = []
     playlist_changed = False
     
@@ -166,45 +183,40 @@ def process_single_folder(folder_name):
         safe_folder_name = folder_name.replace(" ", "_")
         desired_filename = f"{safe_folder_name}_E{str(idx+1).zfill(2)}.mp4"
         
-        print(f"{log_prefix} 🔄 Processing Video: {desired_filename}")
+        print(f"{log_prefix} 🔄 Processing: {desired_filename}")
         
         remote_id, folder_dest_id = add_remote_upload(link, desired_filename)
         
         success = False
         if remote_id:
             if wait_for_completion(remote_id, log_prefix):
-                time.sleep(1) # Short wait
+                time.sleep(1)
                 final_link = get_real_file_link(desired_filename, folder_dest_id)
                 if final_link:
                     new_playlist.append({"video": final_link})
                     playlist_changed = True
                     success = True
-                    print(f"{log_prefix} ✅ Video Done: {desired_filename}")
+                    print(f"{log_prefix} ✅ Done: {desired_filename}")
 
         if not success:
-            print(f"{log_prefix} ❌ Video Failed: {desired_filename}")
+            print(f"{log_prefix} ❌ Failed: {desired_filename}")
             new_playlist.append(item)
 
-    # B. Process Subtitles
     subtitle_playlist = []
     subtitle_changed = False
     
     if vtt_files_data:
-        print(f"{log_prefix} 📝 Processing {len(vtt_files_data)} subtitles...")
-        # Sort keys to maintain order
+        print(f"{log_prefix} 📝 Processing subs...")
         for vtt_name in sorted(vtt_files_data.keys()):
             content = vtt_files_data[vtt_name]
             cloud_link = upload_subtitle_to_cloud(content.encode('utf-8'), vtt_name)
             if cloud_link:
                 subtitle_playlist.append({"video": cloud_link})
                 subtitle_changed = True
-                # print(f"{log_prefix} ☁️ Sub Uploaded: {vtt_name}")
 
-    # ---------------------------------------------------------
-    # PHASE 3: SAVE DATA (Connect FTP -> Write -> Disconnect)
-    # ---------------------------------------------------------
+    # 3. FTP SAVE
     if playlist_changed or subtitle_changed:
-        print(f"{log_prefix} 💾 Saving changes to FTP...")
+        print(f"{log_prefix} 💾 Saving...")
         try:
             ftp = connect_ftp()
             try:
@@ -218,20 +230,20 @@ def process_single_folder(folder_name):
                     sub_json_bytes = json.dumps(subtitle_playlist, indent=2).encode('utf-8')
                     ftp.storbinary("STOR subtitle.json", BytesIO(sub_json_bytes))
                     
-                print(f"{log_prefix} ✅ Saved successfully!")
+                print(f"{log_prefix} ✅ Saved!")
             finally:
-                ftp.quit() # 🔥 Close immediately
+                ftp.quit()
         except Exception as e:
             print(f"{log_prefix} ❌ Error saving: {e}")
     else:
-        print(f"{log_prefix} ℹ️ No changes to save.")
+        print(f"{log_prefix} ℹ️ No changes.")
 
 # ==========================================
-# 🚀 MAIN PROCESS
+# 🚀 MAIN
 # ==========================================
 
 def main():
-    print("🔌 Connecting to FTP to list folders...")
+    print("🔌 Connecting to FTP...")
     folders_to_process = []
     try:
         ftp = connect_ftp()
@@ -242,14 +254,12 @@ def main():
             folders_to_process.append(item)
         ftp.quit()
     except Exception as e:
-        print(f"❌ Error listing folders: {e}")
+        print(f"❌ Error listing: {e}")
         return
 
     print(f"📂 Found {len(folders_to_process)} folders.")
     print(f"🚀 Starting ThreadPool with {MAX_WORKERS} workers...")
-    print("-" * 40)
-
-    # تشغيل 20 عملية في نفس الوقت
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         executor.map(process_single_folder, folders_to_process)
 
